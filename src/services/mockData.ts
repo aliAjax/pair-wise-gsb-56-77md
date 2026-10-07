@@ -7,6 +7,7 @@ import type {
   WorkspaceState,
 } from '@/types/domain'
 import { createApprovalRoute, validatePackage } from './rules'
+import { migrateWorkspace } from './quota'
 
 function pages(
   count: number,
@@ -322,62 +323,68 @@ export function createInitialState(): WorkspaceState {
     }
   })
 
-  const findings = packages.flatMap((packageItem) =>
-    validatePackage(packageItem, files, rules),
+  const workspace = migrateWorkspace(
+    {
+      packages,
+      files,
+      rules,
+      findings: [],
+      comments: [
+        {
+          id: 'comment-1',
+          packageId: 'pkg-001',
+          author: '合规专员',
+          content: '第 7 页固化温度属于受控技术参数，请校核脱敏后版本是否已替换。',
+          createdAt: '2026-09-27T07:30:00.000Z',
+          round: 1,
+        },
+        {
+          id: 'comment-2',
+          packageId: 'pkg-003',
+          author: '技术安全负责人',
+          content: '本轮退回原因：人员接触清单缺失，且外籍人员范围未在最终用户证明中说明。',
+          createdAt: '2026-09-26T08:10:00.000Z',
+          round: 2,
+        },
+      ],
+      audit: [
+        {
+          id: 'audit-1',
+          packageId: 'pkg-001',
+          action: '拆解资料包',
+          target: '复材机翼铺层工艺资料包',
+          operator: '合规专员',
+          detail: '拆分为 2 个文件，共 17 页。',
+          createdAt: '2026-09-27T02:30:00.000Z',
+        },
+        {
+          id: 'audit-2',
+          packageId: 'pkg-003',
+          action: '审批退回',
+          target: '精密光刻运动控制技术说明',
+          operator: '技术安全负责人',
+          detail: '需要补充人员接触清单并重新核对最终用途。',
+          createdAt: '2026-09-26T08:10:00.000Z',
+        },
+        {
+          id: 'audit-3',
+          packageId: 'pkg-002',
+          action: '批准资料包',
+          target: '工业控制器基础软件包',
+          operator: '合规专员',
+          detail: '全部审批步骤完成，预占额度已转实占并完成许可。',
+          createdAt: '2026-09-27T03:20:00.000Z',
+        },
+      ],
+      reservations: [],
+    },
+    now,
   )
-  return {
-    packages,
-    files,
-    rules,
-    findings,
-    comments: [
-      {
-        id: 'comment-1',
-        packageId: 'pkg-001',
-        author: '合规专员',
-        content: '第 7 页固化温度属于受控技术参数，请校核脱敏后版本是否已替换。',
-        createdAt: '2026-09-27T07:30:00.000Z',
-        round: 1,
-      },
-      {
-        id: 'comment-2',
-        packageId: 'pkg-003',
-        author: '技术安全负责人',
-        content: '本轮退回原因：人员接触清单缺失，且外籍人员范围未在最终用户证明中说明。',
-        createdAt: '2026-09-26T08:10:00.000Z',
-        round: 2,
-      },
-    ],
-    audit: [
-      {
-        id: 'audit-1',
-        packageId: 'pkg-001',
-        action: '拆解资料包',
-        target: '复材机翼铺层工艺资料包',
-        operator: '合规专员',
-        detail: '拆分为 2 个文件，共 17 页。',
-        createdAt: '2026-09-27T02:30:00.000Z',
-      },
-      {
-        id: 'audit-2',
-        packageId: 'pkg-003',
-        action: '审批退回',
-        target: '精密光刻运动控制技术说明',
-        operator: '技术安全负责人',
-        detail: '需要补充人员接触清单并重新核对最终用途。',
-        createdAt: '2026-09-26T08:10:00.000Z',
-      },
-      {
-        id: 'audit-3',
-        packageId: 'pkg-002',
-        action: '批准资料包',
-        target: '工业控制器基础软件包',
-        operator: '合规专员',
-        detail: '全部审批步骤完成，等待许可额度扣减。',
-        createdAt: '2026-09-27T03:20:00.000Z',
-      },
-    ],
-  }
+  // 校验结论基于回填后的预占账生成（历史 held/settled 计入共享池占用）。
+  workspace.findings = packages.flatMap((packageItem) =>
+    validatePackage(packageItem, files, rules, workspace.reservations),
+  )
+  return workspace
 }
 
 export const categoryLabels = {

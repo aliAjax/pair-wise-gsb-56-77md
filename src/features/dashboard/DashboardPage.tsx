@@ -6,6 +6,7 @@ import { StatusTag } from '@/components/StatusTag'
 import { useGetWorkspaceQuery } from '@/app/api'
 import type { MaterialPackage, ValidationFinding } from '@/types/domain'
 import { categoryLabels } from '@/services/mockData'
+import { poolUsage } from '@/services/quota'
 
 export function DashboardPage() {
   const navigate = useNavigate()
@@ -16,14 +17,6 @@ export function DashboardPage() {
   const highFindings = data.findings.filter((item) => item.level === 'high')
   const activePackages = data.packages.filter((item) =>
     ['validating', 'reviewing', 'returned'].includes(item.status),
-  )
-  const controlledPages = data.files.reduce(
-    (total, file) =>
-      total +
-      (file.versions.find((version) => version.id === file.activeVersionId)?.pages.filter(
-        (page) => page.controlled,
-      ).length ?? 0),
-    0,
   )
   const reviewedPages = data.files.reduce(
     (total, file) =>
@@ -39,6 +32,17 @@ export function DashboardPage() {
       (file.versions.find((version) => version.id === file.activeVersionId)?.pages.length ?? 0),
     0,
   )
+  const heldTotal = data.reservations
+    .filter((item) => item.status === 'held')
+    .reduce((sum, item) => sum + item.amount, 0)
+  const settledTotal = data.reservations
+    .filter((item) => item.status === 'settled')
+    .reduce((sum, item) => sum + item.amount, 0)
+  const conflictCount = data.reservations.filter((item) => item.status === 'conflicted').length
+  const failedCount = data.reservations.filter((item) => item.status === 'failed').length
+  const rulePoolSummary = data.rules
+    .map((rule) => ({ rule, ...poolUsage(data.reservations, rule.id) }))
+    .filter((entry) => entry.held > 0 || entry.settled > 0)
 
   const findingColumns: TableColumnsType<ValidationFinding> = [
     {
@@ -120,9 +124,16 @@ export function DashboardPage() {
           <small>审批中、已退回或校验中</small>
         </div>
         <div className="metric warning">
-          <span>受控技术页</span>
-          <strong>{controlledPages}</strong>
-          <small>当前版本已标记受控的页面</small>
+          <span>在途预占额度</span>
+          <strong>{heldTotal}</strong>
+          <small>审批中预占；历史实占累计 {settledTotal}</small>
+        </div>
+        <div className="metric danger">
+          <span>冲突 / 中断批次</span>
+          <strong>
+            {conflictCount} / {failedCount}
+          </strong>
+          <small>并发冲突保留意见；中断批次可恢复</small>
         </div>
         <div className="metric">
           <span>逐页核对进度</span>
@@ -181,10 +192,19 @@ export function DashboardPage() {
               </p>
             </div>
             <div>
-              <strong>额度控制</strong>
+              <strong>额度预占账</strong>
               <p className="muted">
-                审批完成后才允许扣减许可额度，超额度或额度不足时拒绝执行。
+                进入审批即按规则上限预占，全部通过后转实占；并发先到者生效、后到者留冲突，退回即释放。
               </p>
+              {rulePoolSummary.length ? (
+                <Space direction="vertical" size={4} style={{ marginTop: 6 }}>
+                  {rulePoolSummary.map(({ rule, settled, held }) => (
+                    <div key={rule.id} className="muted">
+                      {rule.name}：实占 {settled} · 预占 {held} / {rule.quotaLimit}
+                    </div>
+                  ))}
+                </Space>
+              ) : null}
             </div>
           </Space>
         </section>

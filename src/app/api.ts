@@ -8,7 +8,18 @@ import type {
   WorkspaceState,
 } from '@/types/domain'
 import { loadWorkspace, resetWorkspace, saveWorkspace } from '@/services/storage'
-import { createApprovalRoute, findApplicableRule, validatePackage } from '@/services/rules'
+import { findApplicableRule, validatePackage } from '@/services/rules'
+import {
+  QuotaError,
+  abandonConflict,
+  applyBasisChange,
+  approveStep,
+  recoverReservations,
+  resubmitConflict,
+  returnStep,
+  submitForApproval,
+  type AuditEvent,
+} from '@/services/quota'
 
 type MockRequest = {
   url: string
@@ -16,24 +27,42 @@ type MockRequest = {
   body?: unknown
 }
 
-type MockError = { status: number; error: string }
+type MockError = { status: number; error: string; meta?: Record<string, unknown> }
 
 const wait = (ms = 180) => new Promise((resolve) => window.setTimeout(resolve, ms))
 const now = () => new Date().toISOString()
 
-const mockBaseQuery: BaseQueryFn<MockRequest, unknown, MockError> = async ({
-  url,
-  body,
-}) => {
-  await wait()
-  let state = loadWorkspace()
-  const payload = (body ?? {}) as Record<string, unknown>
-  const audit = (entry: Omit<WorkspaceState['audit'][number], 'id' | 'createdAt'>) => {
-    state.audit.unshift({ ...entry, id: `audit-${crypto.randomUUID()}`, createdAt: now() })
-  }
+/**
+ * 串行化所有写入事务：两个审批窗口同时提交时，请求依次进入临界区，
+ * 后到者读到的是先到者已落盘的账本，从而先到者生效、后到者见冲突。
+ */
+let writeChain: Promise<unknown> = Promise.resolve()
+function withWriteLock<T>(task: () => Promise<T> | T): Promise<T> {
+  const run = writeChain.then(task, task)
+  writeChain = run.then(
+    () => undefined,
+    () => undefined,
+  )
+  return run
+}
 
-  try {
-    if (url === '/workspace') return { data: state }
+const mockBaseQuery: BaseQueryFn<MockRequest, unknown, MockError> = ({ url, body }) => {
+  return withWriteLock(async () => {
+    // 临界区内读取，确保看到前一个事务的最新落盘。
+    let state = loadWorkspace()
+    const payload = (body ?? {}) as Record<string, unknown>
+    const appendAudit = (events: AuditEvent[]) => {
+      events
+        .map((event) => ({ ...event, id: `audit-${crypto.randomUUID()}`, createdAt: now() }))
+        .forEach((entry) => state.audit.unshift(entry))
+    }
+    const audit = (entry: Omit<WorkspaceState['audit'][number], 'id' | 'createdAt'>) => {
+      state.audit.unshift({ ...entry, id: `audit-${crypto.randomUUID()}`, createdAt: now() })
+    }
+
+    try {
+      await wait()
+      if (url === '/workspace') return { data: state }
 
     if (url === '/package/save') {
       const packageId = String(payload.packageId)
@@ -42,6 +71,8 @@ const mockBaseQuery: BaseQueryFn<MockRequest, unknown, MockError> = async ({
       if (!current) throw new Error('资料包不存在')
       Object.assign(current, patch, { updatedAt: now() })
       current.matchedRuleId = findApplicableRule(current, state.rules)?.id
+      // 技术参数/目的地/声明等变化后，未完成审批的预占失效并按新版本重算。
+      appendAudit(applyBasisChange(state, current, now(), '技术参数或申报信息变化'))
       audit({
         packageId,
         action: '更新资料包',
@@ -97,7 +128,13 @@ const mockBaseQuery: BaseQueryFn<MockRequest, unknown, MockError> = async ({
       const file = payload.file as MaterialFile
       const index = state.files.findIndex((item) => item.id === file.id)
       if (index >= 0) state.files[index] = file
-      else state.files.push(file)
+      else {
+        state.files.push(file)
+        const packageAfterFile = state.packages.find((item) => item.id === file.packageId)
+        if (packageAfterFile) {
+          appendAudit(applyBasisChange(state, packageAfterFile, now(), `新增文件 ${file.name}`))
+        }
+      }
     } else if (url === '/file/version/add') {
       const packageId = String(payload.packageId)
       const fileId = String(payload.fileId)
@@ -125,6 +162,11 @@ const mockBaseQuery: BaseQueryFn<MockRequest, unknown, MockError> = async ({
       }
       file.versions.push(newVersion)
       file.activeVersionId = newVersion.id
+      // 文件换版后，旧审批仍有效；未完成审批的预占失效并按新版本重算。
+      const packageAfterVersion = state.packages.find((item) => item.id === packageId)
+      if (packageAfterVersion) {
+        appendAudit(applyBasisChange(state, packageAfterVersion, now(), `文件 ${file.name} 换版为 ${label}`))
+      }
       audit({
         packageId,
         action: '上传文件版本',
@@ -138,6 +180,12 @@ const mockBaseQuery: BaseQueryFn<MockRequest, unknown, MockError> = async ({
       const file = state.files.find((item) => item.id === fileId)
       if (!file) throw new Error('文件不存在')
       file.referencedVersionId = versionId
+      const packageAfterReference = state.packages.find((item) => item.id === file.packageId)
+      if (packageAfterReference) {
+        appendAudit(
+          applyBasisChange(state, packageAfterReference, now(), `文件 ${file.name} 引用版本调整`),
+        )
+      }
       audit({
         packageId: file.packageId,
         action: '选择引用版本',
@@ -166,7 +214,7 @@ const mockBaseQuery: BaseQueryFn<MockRequest, unknown, MockError> = async ({
       if (!packageItem) throw new Error('资料包不存在')
       state.findings = [
         ...state.findings.filter((item) => item.packageId !== packageId),
-        ...validatePackage(packageItem, state.files, state.rules),
+        ...validatePackage(packageItem, state.files, state.rules, state.reservations ?? []),
       ]
       audit({
         packageId,
@@ -213,19 +261,14 @@ const mockBaseQuery: BaseQueryFn<MockRequest, unknown, MockError> = async ({
       const packageId = String(payload.packageId)
       const packageItem = state.packages.find((item) => item.id === packageId)
       if (!packageItem) throw new Error('资料包不存在')
-      const rule = findApplicableRule(packageItem, state.rules)
-      if (!rule) throw new Error('未匹配到许可规则')
-      packageItem.approvalRoute = createApprovalRoute(rule.approvalLevel)
-      packageItem.matchedRuleId = rule.id
-      packageItem.status = 'reviewing'
-      packageItem.currentRound += 1
-      audit({
-        packageId,
-        action: '提交审批',
-        target: packageItem.code,
+      const result = submitForApproval(state, packageItem, {
+        now: now(),
         operator: '当前用户',
-        detail: `按 ${rule.name} 生成审批路线，第 ${packageItem.currentRound} 轮。`,
+        comment: payload.comment ? String(payload.comment) : undefined,
+        simulateCrash: Boolean(payload.simulateCrash),
       })
+      // 正常路径：账本 + 路线同一批次落盘。
+      appendAudit(result.events)
     } else if (url === '/approval/decide') {
       const packageId = String(payload.packageId)
       const packageItem = state.packages.find((item) => item.id === packageId)
@@ -234,40 +277,32 @@ const mockBaseQuery: BaseQueryFn<MockRequest, unknown, MockError> = async ({
       if (!step || step.status !== 'active') throw new Error('当前步骤不可审批')
       const decision = String(payload.decision)
       step.comment = String(payload.comment ?? '')
-      step.decidedAt = now()
+      let events: AuditEvent[]
       if (decision === 'return') {
-        step.status = 'returned'
-        packageItem.status = 'returned'
+        events = returnStep(state, packageItem, step, now())
       } else {
-        step.status = 'approved'
-        const next = packageItem.approvalRoute.find((item) => item.order === step.order + 1)
-        if (next) next.status = 'active'
-        else packageItem.status = 'approved'
+        events = approveStep(state, packageItem, step, now())
       }
-      audit({
+      events.push({
         packageId,
         action: decision === 'return' ? '审批退回' : '审批通过',
         target: `${packageItem.code} / ${step.role}`,
         operator: step.assignee,
         detail: step.comment || '无补充意见。',
       })
-    } else if (url === '/license/deduct') {
-      const packageId = String(payload.packageId)
-      const amount = Number(payload.amount)
-      const packageItem = state.packages.find((item) => item.id === packageId)
-      if (!packageItem) throw new Error('资料包不存在')
-      if (packageItem.quotaUsed + amount > packageItem.quotaLimit) {
-        throw new Error('许可额度不足')
-      }
-      packageItem.quotaUsed += amount
-      packageItem.status = 'licensed'
-      audit({
-        packageId,
-        action: '扣减许可额度',
-        target: packageItem.code,
-        operator: '当前用户',
-        detail: `扣减 ${amount}，剩余 ${packageItem.quotaLimit - packageItem.quotaUsed}。`,
-      })
+      appendAudit(events)
+    } else if (url === '/quota/recover') {
+      appendAudit(recoverReservations(state, now()))
+    } else if (url === '/quota/resubmit') {
+      const result = resubmitConflict(
+        state,
+        String(payload.reservationId),
+        now(),
+        payload.comment ? String(payload.comment) : undefined,
+      )
+      appendAudit(result.events)
+    } else if (url === '/quota/abandon') {
+      appendAudit(abandonConflict(state, String(payload.reservationId), now()))
     } else if (url === '/comment/add') {
       state.comments.unshift({
         ...(payload.comment as Omit<ReviewComment, 'id' | 'createdAt'>),
@@ -286,6 +321,21 @@ const mockBaseQuery: BaseQueryFn<MockRequest, unknown, MockError> = async ({
     saveWorkspace(state)
     return { data: state }
   } catch (error) {
+    // 并发冲突 / 额度阻断时，冲突批次与意见已写入账本：先完整落盘再返回错误说明。
+    if (error instanceof QuotaError) {
+      saveWorkspace(state)
+      return {
+        error: {
+          status: 409,
+          error: error.message,
+          meta: {
+            shortage: error.shortage,
+            blocker: error.blocker,
+            conflictReservationId: error.conflictReservationId,
+          },
+        },
+      }
+    }
     return {
       error: {
         status: 400,
@@ -293,8 +343,8 @@ const mockBaseQuery: BaseQueryFn<MockRequest, unknown, MockError> = async ({
       },
     }
   }
+  })
 }
-
 export const workspaceApi = createApi({
   reducerPath: 'workspaceApi',
   baseQuery: mockBaseQuery,
@@ -359,7 +409,10 @@ export const workspaceApi = createApi({
       query: (body) => ({ url: '/package/version', method: 'POST', body }),
       invalidatesTags: ['Workspace'],
     }),
-    submitApproval: builder.mutation<WorkspaceState, { packageId: string }>({
+    submitApproval: builder.mutation<
+      WorkspaceState,
+      { packageId: string; comment?: string; simulateCrash?: boolean }
+    >({
       query: (body) => ({ url: '/approval/submit', method: 'POST', body }),
       invalidatesTags: ['Workspace'],
     }),
@@ -370,8 +423,19 @@ export const workspaceApi = createApi({
       query: (body) => ({ url: '/approval/decide', method: 'POST', body }),
       invalidatesTags: ['Workspace'],
     }),
-    deductQuota: builder.mutation<WorkspaceState, { packageId: string; amount: number }>({
-      query: (body) => ({ url: '/license/deduct', method: 'POST', body }),
+    recoverReservations: builder.mutation<WorkspaceState, void>({
+      query: () => ({ url: '/quota/recover', method: 'POST' }),
+      invalidatesTags: ['Workspace'],
+    }),
+    resubmitConflict: builder.mutation<
+      WorkspaceState,
+      { reservationId: string; comment?: string }
+    >({
+      query: (body) => ({ url: '/quota/resubmit', method: 'POST', body }),
+      invalidatesTags: ['Workspace'],
+    }),
+    abandonConflict: builder.mutation<WorkspaceState, { reservationId: string }>({
+      query: (body) => ({ url: '/quota/abandon', method: 'POST', body }),
       invalidatesTags: ['Workspace'],
     }),
     addComment: builder.mutation<
@@ -407,7 +471,9 @@ export const {
   useCreatePackageVersionMutation,
   useSubmitApprovalMutation,
   useDecideApprovalMutation,
-  useDeductQuotaMutation,
+  useRecoverReservationsMutation,
+  useResubmitConflictMutation,
+  useAbandonConflictMutation,
   useAddCommentMutation,
   useAddAuditMutation,
   useResetWorkspaceMutation,

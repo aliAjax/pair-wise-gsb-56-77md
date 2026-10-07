@@ -4,9 +4,11 @@ import type {
   LicenseRule,
   MaterialFile,
   MaterialPackage,
+  QuotaReservation,
   ValidationFinding,
   VersionDiff,
 } from '@/types/domain'
+import { poolUsage } from './quota'
 
 const levelRank: Record<ApprovalLevel, number> = {
   standard: 1,
@@ -77,17 +79,14 @@ export function findApplicableRule(
     return categoryMatch && destinationMatch && tagMatch && personnelMatch
   })
   return candidates.sort((left, right) => {
-    const leftScore =
-      left.destinations.length +
-      left.technologyTags.length +
-      left.personnelScopes.length +
-      levelRank[left.approvalLevel]
-    const rightScore =
-      right.destinations.length +
-      right.technologyTags.length +
-      right.personnelScopes.length +
-      levelRank[right.approvalLevel]
-    return rightScore - leftScore
+    // 特异性优先：明确国家/地区匹配高于通配兜底；技术标签与人员范围限定越多越具体；
+    // 同特异性时审批等级更高的规则优先。
+    const score = (rule: LicenseRule) =>
+      (rule.destinations.includes('*') ? 0 : 100) +
+      rule.technologyTags.length * 10 +
+      rule.personnelScopes.length * 10 +
+      levelRank[rule.approvalLevel]
+    return score(right) - score(left)
   })[0]
 }
 
@@ -95,6 +94,7 @@ export function validatePackage(
   packageItem: MaterialPackage,
   files: MaterialFile[],
   rules: LicenseRule[],
+  reservations: QuotaReservation[] = [],
 ): ValidationFinding[] {
   const findings: ValidationFinding[] = []
   const packageFiles = files.filter((file) => file.packageId === packageItem.id)
@@ -145,10 +145,44 @@ export function validatePackage(
     )
   }
 
-  if (packageItem.quotaUsed >= packageItem.quotaLimit) {
-    add('quota', 'high', '许可额度已用尽。', '申请额度调整或拆分至其他有效许可。')
-  } else if (packageItem.quotaLimit - packageItem.quotaUsed <= 10) {
-    add('quota', 'medium', '剩余许可额度不足 10%。', '审批通过前确认额度来源和扣减顺序。')
+  if (packageItem.quotaBlocked) {
+    add(
+      'quota',
+      'high',
+      packageItem.quotaBlocked.reason,
+      '等待在途预占释放后再提交；冲突页可查看缺额并重提。',
+    )
+  }
+
+  // 额度池按规则共享：实占（settled）+ 在途预占（held）共同占用额度。
+  const { settled, held } = poolUsage(reservations, rule.id)
+  const committed = settled + held
+  const remainingPool = rule.quotaLimit - committed
+  const activeHeld = reservations.find(
+    (item) => item.packageId === packageItem.id && item.status === 'held',
+  )
+  if (packageItem.pendingConflict) {
+    add(
+      'quota-conflict',
+      'high',
+      `并发提交冲突：${packageItem.pendingConflict.reason}`,
+      '先到者已占用额度，本轮意见已保留；额度释放后可在冲突批次上重提。',
+    )
+  }
+  if (committed >= rule.quotaLimit && !activeHeld) {
+    add(
+      'quota',
+      'high',
+      `规则「${rule.name}」额度已全部占用（实占 ${settled}、预占 ${held} / ${rule.quotaLimit}）。`,
+      '申请额度调整或等待在途审批结束，提交时会被直接挡住并说明缺额。',
+    )
+  } else if (remainingPool <= 10 && !activeHeld) {
+    add(
+      'quota',
+      'medium',
+      `规则额度池剩余可预占 ${Math.max(0, remainingPool)}，按上限预占可能被在途审批抢占。`,
+      '提交前确认额度来源；并发场景下先到者生效。',
+    )
   }
 
   packageFiles.forEach((file) => {

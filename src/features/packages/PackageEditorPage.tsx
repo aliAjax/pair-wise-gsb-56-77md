@@ -27,6 +27,7 @@ import {
 } from '@/app/api'
 import type { FileVersion, MaterialCategory, MaterialFile } from '@/types/domain'
 import { categoryLabels } from '@/services/mockData'
+import { poolUsage, reservationStatusLabels } from '@/services/quota'
 
 interface PackageFormValues {
   title: string
@@ -100,6 +101,12 @@ export function PackageEditorPage() {
 
   const rule = data.rules.find((item) => item.id === packageItem.matchedRuleId)
   const packageFindings = data.findings.filter((item) => item.packageId === packageId)
+  const { settled: poolSettled, held: poolHeld } = rule
+    ? poolUsage(data.reservations, rule.id)
+    : { settled: 0, held: 0 }
+  const activeReservation = data.reservations.find(
+    (item) => item.id === packageItem.activeReservationId && item.status === 'held',
+  )
 
   async function savePackageInfo() {
     const values = await packageForm.validateFields()
@@ -327,7 +334,8 @@ export function PackageEditorPage() {
             <div>
               <strong>许可额度</strong>
               <div className="muted" style={{ marginTop: 5 }}>
-                已使用 {packageItem.quotaUsed} / {packageItem.quotaLimit}
+                规则池实占 {poolSettled} / 预占 {poolHeld}（上限 {rule.quotaLimit}）
+                {activeReservation ? `；本包在途预占 ${activeReservation.amount}` : ''}
               </div>
             </div>
           </Space>
@@ -374,6 +382,28 @@ export function PackageEditorPage() {
             .map((item) => item.message)
             .join('；')}
           style={{ marginBottom: 16 }}
+        />
+      ) : null}
+
+      {packageItem.pendingConflict || packageItem.quotaBlocked ? (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="版本/参数变化导致预占重算"
+          description={
+            packageItem.pendingConflict?.reason ??
+            packageItem.quotaBlocked?.reason ??
+            '未完成审批的旧预占已失效，请前往审批页查看冲突或缺额。'
+          }
+        />
+      ) : activeReservation ? (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={`审批在途，已按规则上限预占 ${activeReservation.amount}`}
+          description="现行版本、引用版本或技术参数一旦变化，未完成步骤的预占将失效并按新版本重算；已通过步骤保留原依据。"
         />
       ) : null}
 
@@ -469,9 +499,14 @@ export function PackageEditorPage() {
               <div>{packageItem.currentRound ? `第 ${packageItem.currentRound} 轮` : '未提交'}</div>
             </div>
             <div>
-              <span className="muted">许可额度</span>
+              <span className="muted">许可额度（共享池）</span>
               <div>
-                {packageItem.quotaUsed} / {packageItem.quotaLimit}
+                实占 {poolSettled} · 预占 {poolHeld} / {rule?.quotaLimit ?? packageItem.quotaLimit}
+                {activeReservation ? (
+                  <Tag color="processing" style={{ marginLeft: 8 }}>
+                    {reservationStatusLabels.held} {activeReservation.amount}
+                  </Tag>
+                ) : null}
               </div>
             </div>
             <div>
