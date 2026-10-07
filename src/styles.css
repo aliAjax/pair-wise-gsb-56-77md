@@ -1,0 +1,311 @@
+:root {
+  font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  color: #223342;
+  background: #edf1f4;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-width: 1100px;
+  min-height: 100vh;
+  margin: 0;
+}
+
+body {
+  background: #edf1f4;
+}
+
+.app-shell {
+  min-height: 100vh;
+}
+
+.app-sider {
+  position: relative;
+  min-height: 100vh;
+  border-right: 1px solid #29455d;
+}
+
+.brand {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  height: 82px;
+  padding: 0 20px;
+  color: #fff;
+  border-bottom: 1px solid #2b4962;
+}
+
+.brand-mark {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  color: #17324d;
+  font-weight: 800;
+  background: #56bfc0;
+  border-radius: 6px;
+}
+
+.brand strong,
+.brand span {
+  display: block;
+}
+
+.brand strong {
+  font-size: 16px;
+}
+
+.brand span {
+  margin-top: 4px;
+  color: #91a9ba;
+  font-size: 12px;
+}
+
+.app-sider .ant-menu {
+  padding: 10px;
+  border-inline-end: 0;
+}
+
+.app-sider .ant-menu-item {
+  margin-block: 4px;
+  border-radius: 5px;
+}
+
+.sider-foot {
+  position: absolute;
+  right: 16px;
+  bottom: 20px;
+  left: 16px;
+  padding-top: 14px;
+  color: #89a2b4;
+  border-top: 1px solid #2b4962;
+}
+
+.sider-foot span,
+.sider-foot strong,
+.sider-foot small {
+  display: block;
+}
+
+.sider-foot strong {
+  margin: 6px 0;
+  color: #edf5f8;
+  font-size: 13px;
+}
+
+.sider-foot small {
+  font-size: 12px;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 82px;
+  padding: 0 28px;
+  border-bottom: 1px solid #d9e1e8;
+}
+
+.app-header .ant-typography {
+  margin: 0;
+}
+
+.header-context {
+  font-size: 12px;
+}
+
+.header-user {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.app-content {
+  min-height: calc(100vh - 82px);
+  padding: 22px 26px 36px;
+  background: #edf1f4;
+}
+
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.page-header h1 {
+  margin: 0;
+  font-size: 21px;
+  font-weight: 650;
+}
+
+.page-header p {
+  margin: 7px 0 0;
+  color: #687b8b;
+  font-size: 13px;
+}
+
+.page-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  padding: 14px;
+  margin-bottom: 14px;
+  background: #fff;
+  border: 1px solid #dce4ea;
+  border-radius: 5px;
+}
+
+.toolbar .grow {
+  flex: 1;
+}
+
+.panel {
+  padding: 18px;
+  margin-bottom: 16px;
+  background: #fff;
+  border: 1px solid #dce4ea;
+  border-radius: 6px;
+}
+
+.panel-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.panel-title h2,
+.panel-title h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.metric {
+  padding: 18px;
+  background: #fff;
+  border: 1px solid #dce4ea;
+  border-left: 4px solid #237b78;
+  border-radius: 5px;
+}
+
+.metric.warning {
+  border-left-color: #d18a28;
+}
+
+.metric.danger {
+  border-left-color: #c74d4d;
+}
+
+.metric.info {
+  border-left-color: #3e73a4;
+}
+
+.metric span,
+.metric strong,
+.metric small {
+  display: block;
+}
+
+.metric span {
+  color: #6d7f8e;
+  font-size: 13px;
+}
+
+.metric strong {
+  margin: 8px 0 5px;
+  font-size: 28px;
+}
+
+.metric small {
+  color: #8997a2;
+}
+
+.two-column {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(340px, 0.9fr);
+  gap: 16px;
+}
+
+.three-column {
+  display: grid;
+  grid-template-columns: 310px minmax(0, 1fr) 320px;
+  gap: 16px;
+}
+
+.muted {
+  color: #6d7f8e;
+}
+
+.mono {
+  font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+.finding-message {
+  font-weight: 600;
+}
+
+.finding-action {
+  margin-top: 4px;
+  color: #718290;
+  font-size: 12px;
+}
+
+.page-review-table .pending-page {
+  background: #fff8e8;
+}
+
+.version-box {
+  padding: 12px;
+  background: #f7f9fa;
+  border: 1px solid #e0e7ec;
+  border-radius: 5px;
+}
+
+.diff-before {
+  color: #b13f3f;
+}
+
+.diff-after {
+  color: #267349;
+}
+
+.audit-detail {
+  max-width: 520px;
+  white-space: normal;
+}
+
+@media (max-width: 1320px) {
+  .metric-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .three-column {
+    grid-template-columns: 280px minmax(0, 1fr);
+  }
+
+  .three-column > :last-child {
+    grid-column: 1 / -1;
+  }
+}
