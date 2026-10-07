@@ -7,9 +7,17 @@ export type PackageStatus =
   | 'approved'
   | 'licensed'
   | 'locked'
+  | 'quota-blocked'
 export type ApprovalLevel = 'standard' | 'enhanced' | 'senior'
 export type FindingLevel = 'high' | 'medium' | 'low'
-export type FindingType = 'missing-declaration' | 'escalation' | 'version-mismatch' | 'unclassified-page' | 'quota'
+export type FindingType =
+  | 'missing-declaration'
+  | 'escalation'
+  | 'version-mismatch'
+  | 'unclassified-page'
+  | 'quota'
+  | 'basis-changed'
+  | 'quota-conflict'
 
 export interface PageReview {
   id: string
@@ -42,6 +50,15 @@ export interface MaterialFile {
   versions: FileVersion[]
 }
 
+export interface QuotaBasis {
+  ruleId: string
+  round: number
+  packageLabel: string
+  /** 各资料文件的「现行=引用」版本，作为审批依据 */
+  fileVersions: { fileId: string; file: string; versionId: string; versionLabel: string }[]
+  technologyTags: string[]
+}
+
 export interface ApprovalStep {
   id: string
   order: number
@@ -51,6 +68,58 @@ export interface ApprovalStep {
   status: 'waiting' | 'active' | 'approved' | 'returned'
   comment: string
   decidedAt?: string
+  /** 该步骤通过时的审批依据，文件换版后仍保留 */
+  basisLabel?: string
+  basisVersionLabel?: string
+}
+
+export interface QuotaReservation {
+  id: string
+  ruleId: string
+  packageId: string
+  round: number
+  amount: number
+  status: 'held' | 'confirmed' | 'released' | 'voided'
+  reason: string
+  /** 预占时的审批依据快照 */
+  basis?: QuotaBasis
+  createdAt: string
+  updatedAt: string
+  /** voided/released 时指向新的预占记录（按新版本重算） */
+  replacedBy?: string
+  sourceBatchId?: string
+}
+
+export interface QuotaBatch {
+  id: string
+  type: 'submit-hold' | 'rehold' | 'deduct-confirm'
+  ruleId: string
+  packageId: string
+  round: number
+  /** deduct-confirm 时最终确认扣减的额度 */
+  amount?: number
+  reservationId?: string
+  basis?: QuotaBasis
+  status: 'pending' | 'committed' | 'failed'
+  note: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface QuotaConflict {
+  id: string
+  ruleId: string
+  packageId: string
+  competitorPackageId: string
+  round: number
+  requested: number
+  available: number
+  shortfall: number
+  winnerPackageId?: string
+  winnerBatchId?: string
+  loserBatchId?: string
+  reason: string
+  createdAt: string
 }
 
 export interface PackageVersion {
@@ -78,6 +147,7 @@ export interface ReviewComment {
   content: string
   createdAt: string
   round: number
+  kind?: 'manual' | 'conflict' | 'basis' | 'recovery'
 }
 
 export interface MaterialPackage {
@@ -96,6 +166,8 @@ export interface MaterialPackage {
   matchedRuleId?: string
   approvalRoute: ApprovalStep[]
   currentRound: number
+  /** 当前生效预占的依据快照，文件换版/技术参数变化后重算 */
+  quotaBasis?: QuotaBasis
   quotaUsed: number
   quotaLimit: number
   createdAt: string
@@ -137,12 +209,16 @@ export interface AuditEntry {
 }
 
 export interface WorkspaceState {
+  schemaVersion: number
   packages: MaterialPackage[]
   files: MaterialFile[]
   rules: LicenseRule[]
   findings: ValidationFinding[]
   comments: ReviewComment[]
   audit: AuditEntry[]
+  reservations: QuotaReservation[]
+  batches: QuotaBatch[]
+  conflicts: QuotaConflict[]
 }
 
 export interface VersionDiff {

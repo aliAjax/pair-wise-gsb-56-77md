@@ -327,7 +327,7 @@ export function PackageEditorPage() {
             <div>
               <strong>许可额度</strong>
               <div className="muted" style={{ marginTop: 5 }}>
-                已使用 {packageItem.quotaUsed} / {packageItem.quotaLimit}
+                历史已确认 {packageItem.quotaUsed} / 规则上限 {packageItem.quotaLimit}；预占与可恢复状态见审批页与许可页。
               </div>
             </div>
           </Space>
@@ -471,7 +471,7 @@ export function PackageEditorPage() {
             <div>
               <span className="muted">许可额度</span>
               <div>
-                {packageItem.quotaUsed} / {packageItem.quotaLimit}
+                已确认 {packageItem.quotaUsed} / 上限 {packageItem.quotaLimit}
               </div>
             </div>
             <div>

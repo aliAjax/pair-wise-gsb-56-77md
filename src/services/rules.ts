@@ -4,9 +4,11 @@ import type {
   LicenseRule,
   MaterialFile,
   MaterialPackage,
+  QuotaReservation,
   ValidationFinding,
   VersionDiff,
 } from '@/types/domain'
+import { activeHold, ruleSummary } from './quota'
 
 const levelRank: Record<ApprovalLevel, number> = {
   standard: 1,
@@ -77,17 +79,13 @@ export function findApplicableRule(
     return categoryMatch && destinationMatch && tagMatch && personnelMatch
   })
   return candidates.sort((left, right) => {
-    const leftScore =
-      left.destinations.length +
-      left.technologyTags.length +
-      left.personnelScopes.length +
-      levelRank[left.approvalLevel]
-    const rightScore =
-      right.destinations.length +
-      right.technologyTags.length +
-      right.personnelScopes.length +
-      levelRank[right.approvalLevel]
-    return rightScore - leftScore
+    // 精确命中目的地的规则始终优先于仅靠“*”兜底的规则
+    const specificity = (rule: LicenseRule) =>
+      (rule.destinations.includes('*') ? 0 : 100 + rule.destinations.length) +
+      rule.technologyTags.length * 10 +
+      rule.personnelScopes.length * 10 +
+      levelRank[rule.approvalLevel]
+    return specificity(right) - specificity(left)
   })[0]
 }
 
@@ -95,6 +93,7 @@ export function validatePackage(
   packageItem: MaterialPackage,
   files: MaterialFile[],
   rules: LicenseRule[],
+  ledger?: Pick<import('@/types/domain').WorkspaceState, 'reservations' | 'conflicts'>,
 ): ValidationFinding[] {
   const findings: ValidationFinding[] = []
   const packageFiles = files.filter((file) => file.packageId === packageItem.id)
@@ -136,7 +135,11 @@ export function validatePackage(
     (max, step) => Math.max(max, levelRank[step.level]),
     0,
   )
-  if (currentMaxLevel < levelRank[rule.approvalLevel]) {
+  if (
+    currentMaxLevel < levelRank[rule.approvalLevel] &&
+    packageItem.status !== 'draft' &&
+    packageItem.currentRound > 0
+  ) {
     add(
       'escalation',
       'high',
@@ -145,10 +148,65 @@ export function validatePackage(
     )
   }
 
-  if (packageItem.quotaUsed >= packageItem.quotaLimit) {
-    add('quota', 'high', '许可额度已用尽。', '申请额度调整或拆分至其他有效许可。')
-  } else if (packageItem.quotaLimit - packageItem.quotaUsed <= 10) {
-    add('quota', 'medium', '剩余许可额度不足 10%。', '审批通过前确认额度来源和扣减顺序。')
+  // 额度口径：已确认 + 预占占用规则池，审批窗口互斥
+  const reservations: QuotaReservation[] = ledger?.reservations ?? []
+  const summary = ruleSummary({ reservations }, rule)
+  const hold = activeHold({ reservations }, packageItem.id)
+  if (packageItem.status === 'quota-blocked') {
+    add(
+      'quota',
+      'high',
+      '文件换版、引用版本或技术参数变化后，原预占已失效，而新依据重算预占时额度不足。',
+      '等待额度释放后在审批页恢复预占，或调整资料后重新提交；已通过步骤保留原依据。',
+    )
+  } else if (hold) {
+    if (summary.overbooked) {
+      add(
+        'quota',
+        'medium',
+        `本规则池存在历史基线超占（已确认 ${summary.confirmed} + 预占 ${summary.held} / 上限 ${summary.limit}），为旧数据升级基线，不影响当前在途预占。`,
+        '待历史批次释放后自动回归正常水位。',
+      )
+    }
+    if (summary.available <= 0 && packageItem.status === 'reviewing') {
+      add(
+        'quota',
+        'medium',
+        `当前资料包已预占 ${hold.amount}（规则上限整池），审批完成前额度不会被其他窗口重复占用。`,
+        '完成全部审批后确认扣减，或退回释放预占。',
+      )
+    }
+  } else if (
+    ['reviewing', 'approved'].includes(packageItem.status) &&
+    packageItem.status !== 'licensed'
+  ) {
+    add(
+      'quota',
+      'high',
+      '在途审批缺少有效额度预占，提交/确认前必须先预占成功。',
+      '重新提交审批或恢复未完成预占批次。',
+    )
+  }
+  if (summary.limit - summary.confirmed <= 0 && !hold) {
+    add('quota', 'high', `规则「${rule.name}」许可额度已全部确认使用。`, '申请额度调整或拆分至其他有效许可。')
+  } else if (summary.limit - summary.confirmed - summary.held <= 10 && !hold) {
+    add('quota', 'medium', '规则池剩余可预占额度不足 10%。', '审批提交前确认额度来源和预占顺序。')
+  }
+
+  // 并发抢额度失败的冲突：竞争者仍持有时才阻断，释放后历史冲突只留在台账中
+  const openConflict = ledger?.conflicts.find((item) => item.packageId === packageItem.id)
+  const conflictStillHeld = openConflict
+    ? reservations.some(
+        (item) => item.packageId === openConflict.competitorPackageId && item.status === 'held',
+      )
+    : false
+  if (openConflict && conflictStillHeld) {
+    add(
+      'quota-conflict',
+      'high',
+      `并发提交冲突：规则「${rule.name}」额度已被先到的审批窗口预占，本次缺额 ${openConflict.shortfall}。`,
+      '查看冲突意见，待对方释放额度后重新提交并重算预占。',
+    )
   }
 
   packageFiles.forEach((file) => {
@@ -157,7 +215,7 @@ export function validatePackage(
         'version-mismatch',
         'high',
         `${file.name} 当前引用版本与文件现行版本不一致。`,
-        '在版本管理中显式选择唯一引用版本，禁止跨版本拼装。',
+        '在版本管理中显式选择唯一引用版本；切换后在途审批预占将按新依据重算。',
       )
     }
     const activeVersion = file.versions.find((version) => version.id === file.activeVersionId)

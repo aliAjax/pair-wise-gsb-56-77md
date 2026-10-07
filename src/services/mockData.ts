@@ -7,6 +7,8 @@ import type {
   WorkspaceState,
 } from '@/types/domain'
 import { createApprovalRoute, validatePackage } from './rules'
+import { backfillBaselineReservations } from './quota'
+import { SCHEMA_VERSION } from './storage'
 
 function pages(
   count: number,
@@ -216,7 +218,7 @@ export function createInitialState(): WorkspaceState {
       matchedRuleId: 'rule-my-general',
       approvalRoute: [],
       currentRound: 0,
-      quotaUsed: 8,
+      quotaUsed: 0,
       quotaLimit: 100,
       createdAt: '2026-09-28T00:20:00.000Z',
       updatedAt: now,
@@ -323,9 +325,10 @@ export function createInitialState(): WorkspaceState {
   })
 
   const findings = packages.flatMap((packageItem) =>
-    validatePackage(packageItem, files, rules),
+    validatePackage(packageItem, files, rules, { reservations: [], conflicts: [] }),
   )
-  return {
+  const state: WorkspaceState = {
+    schemaVersion: SCHEMA_VERSION,
     packages,
     files,
     rules,
@@ -338,6 +341,7 @@ export function createInitialState(): WorkspaceState {
         content: '第 7 页固化温度属于受控技术参数，请校核脱敏后版本是否已替换。',
         createdAt: '2026-09-27T07:30:00.000Z',
         round: 1,
+        kind: 'manual',
       },
       {
         id: 'comment-2',
@@ -346,6 +350,7 @@ export function createInitialState(): WorkspaceState {
         content: '本轮退回原因：人员接触清单缺失，且外籍人员范围未在最终用户证明中说明。',
         createdAt: '2026-09-26T08:10:00.000Z',
         round: 2,
+        kind: 'manual',
       },
     ],
     audit: [
@@ -373,11 +378,20 @@ export function createInitialState(): WorkspaceState {
         action: '批准资料包',
         target: '工业控制器基础软件包',
         operator: '合规专员',
-        detail: '全部审批步骤完成，等待许可额度扣减。',
+        detail: '全部审批步骤完成，等待许可额度确认扣减。',
         createdAt: '2026-09-27T03:20:00.000Z',
       },
     ],
+    reservations: [],
+    batches: [],
+    conflicts: [],
   }
+  // 回填台账基线：历史已用额度记为 confirmed 基线（不重新占用），审批中按规则上限回填 held
+  backfillBaselineReservations(state, { baseline: false })
+  state.findings = packages.flatMap((packageItem) =>
+    validatePackage(packageItem, files, rules, state),
+  )
+  return state
 }
 
 export const categoryLabels = {
@@ -394,4 +408,5 @@ export const packageStatusLabels: Record<MaterialPackage['status'], string> = {
   approved: '已批准',
   licensed: '已许可',
   locked: '已归档',
+  'quota-blocked': '待恢复预占',
 }

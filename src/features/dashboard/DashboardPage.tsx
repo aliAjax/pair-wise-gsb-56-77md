@@ -15,8 +15,12 @@ export function DashboardPage() {
 
   const highFindings = data.findings.filter((item) => item.level === 'high')
   const activePackages = data.packages.filter((item) =>
-    ['validating', 'reviewing', 'returned'].includes(item.status),
+    ['validating', 'reviewing', 'returned', 'quota-blocked'].includes(item.status),
   )
+  const heldQuota = data.reservations
+    .filter((item) => item.status === 'held')
+    .reduce((sum, item) => sum + item.amount, 0)
+  const pendingBatches = data.batches.filter((item) => item.status === 'pending').length
   const controlledPages = data.files.reduce(
     (total, file) =>
       total +
@@ -124,6 +128,11 @@ export function DashboardPage() {
           <strong>{controlledPages}</strong>
           <small>当前版本已标记受控的页面</small>
         </div>
+        <div className="metric info">
+          <span>预占中额度</span>
+          <strong>{heldQuota}</strong>
+          <small>在途审批整池预占{pendingBatches ? ` · ${pendingBatches} 个批次待恢复` : ''}</small>
+        </div>
         <div className="metric">
           <span>逐页核对进度</span>
           <strong>
@@ -181,9 +190,9 @@ export function DashboardPage() {
               </p>
             </div>
             <div>
-              <strong>额度控制</strong>
+              <strong>额度预占</strong>
               <p className="muted">
-                审批完成后才允许扣减许可额度，超额度或额度不足时拒绝执行。
+                进入审批即按规则上限整池预占，两个审批窗口互斥；版本或技术参数变化后预占按新依据重算，审批完成后确认扣减。
               </p>
             </div>
           </Space>

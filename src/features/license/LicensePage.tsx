@@ -9,27 +9,67 @@ import {
   Space,
   Table,
   Tag,
+  Timeline,
   message,
 } from 'antd'
 import type { TableColumnsType } from 'antd'
-import { SafetyCertificateOutlined } from '@ant-design/icons'
+import {
+  ExperimentOutlined,
+  SafetyCertificateOutlined,
+  ThunderboltOutlined,
+} from '@ant-design/icons'
 import { useSearchParams } from 'react-router-dom'
 import { PageHeader } from '@/components/PageHeader'
 import {
+  useConcurrentDemoMutation,
   useDeductQuotaMutation,
   useGetWorkspaceQuery,
+  useRecoverBatchesMutation,
   useValidatePackageMutation,
 } from '@/app/api'
-import type { LicenseRule } from '@/types/domain'
-import { approvalLevelLabels, findApplicableRule } from '@/services/rules'
+import type {
+  LicenseRule,
+  QuotaConflict,
+  QuotaReservation,
+  ReviewComment,
+} from '@/types/domain'
+import { approvalLevelLabels } from '@/services/rules'
+import { activeHold, ruleSummary } from '@/services/quota'
+
+function errorText(error: unknown): string {
+  if (typeof error === 'object' && error && 'data' in error) {
+    return (error.data as { error?: string }).error ?? '操作失败'
+  }
+  return error instanceof Error ? error.message : '操作失败'
+}
+
+const reservationStatusMeta: Record<
+  QuotaReservation['status'],
+  { label: string; color: string }
+> = {
+  held: { label: '预占中', color: 'gold' },
+  confirmed: { label: '已确认', color: 'green' },
+  released: { label: '已释放', color: 'default' },
+  voided: { label: '已作废', color: 'default' },
+}
+
+const commentKindMeta: Record<NonNullable<ReviewComment['kind']>, { label: string; color: string }> = {
+  manual: { label: '意见', color: 'blue' },
+  conflict: { label: '冲突', color: 'error' },
+  basis: { label: '依据', color: 'orange' },
+  recovery: { label: '恢复', color: 'purple' },
+}
 
 export function LicensePage() {
   const [searchParams] = useSearchParams()
   const { data, isLoading } = useGetWorkspaceQuery()
   const [validatePackage] = useValidatePackageMutation()
   const [deductQuota, deductState] = useDeductQuotaMutation()
+  const [recoverBatches, recoverState] = useRecoverBatchesMutation()
+  const [concurrentDemo, demoState] = useConcurrentDemoMutation()
   const [selectedId, setSelectedId] = useState(searchParams.get('package') ?? '')
   const [amount, setAmount] = useState(5)
+  const [crashNext, setCrashNext] = useState(false)
 
   useEffect(() => {
     if (!selectedId && data?.packages[0]) setSelectedId(data.packages[0].id)
@@ -39,11 +79,21 @@ export function LicensePage() {
     () => data?.packages.find((item) => item.id === selectedId),
     [data, selectedId],
   )
-  const applicableRule = selected && data ? findApplicableRule(selected, data.rules) : undefined
   const currentRule = data?.rules.find((item) => item.id === selected?.matchedRuleId)
   const packageFindings = data?.findings.filter((item) => item.packageId === selectedId) ?? []
   const hasHighFindings = packageFindings.some((item) => item.level === 'high')
-  const remaining = selected ? selected.quotaLimit - selected.quotaUsed : 0
+  const hold = selected && data ? activeHold(data, selected.id) : undefined
+  const pool = currentRule && data ? ruleSummary(data, currentRule) : undefined
+
+  useEffect(() => {
+    if (hold) setAmount((value) => Math.min(value, Math.max(1, hold.amount)))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hold?.id])
+
+  const pendingBatches = useMemo(
+    () => data?.batches.filter((item) => item.status === 'pending') ?? [],
+    [data],
+  )
 
   if (isLoading || !data) return <div className="panel">正在加载许可规则...</div>
 
@@ -56,22 +106,85 @@ export function LicensePage() {
       render: (values: string[]) => values.join('、'),
     },
     {
-      title: '技术标签',
-      dataIndex: 'technologyTags',
-      width: 220,
-      render: (values: string[]) => values.join('、') || '通用',
-    },
-    {
       title: '审批等级',
       dataIndex: 'approvalLevel',
-      width: 110,
+      width: 100,
       render: (value: LicenseRule['approvalLevel']) => approvalLevelLabels[value],
     },
+    { title: '规则上限', dataIndex: 'quotaLimit', width: 90 },
     {
-      title: '规则额度',
-      dataIndex: 'quotaLimit',
-      width: 100,
+      title: '已确认（历史+实扣）',
+      width: 140,
+      render: (_, rule) => ruleSummary(data, rule).confirmed,
     },
+    {
+      title: '预占中',
+      width: 90,
+      render: (_, rule) => {
+        const summary = ruleSummary(data, rule)
+        return <Tag color={summary.held ? 'gold' : 'default'}>{summary.held}</Tag>
+      },
+    },
+    {
+      title: '可预占',
+      width: 100,
+      render: (_, rule) => {
+        const summary = ruleSummary(data, rule)
+        return (
+          <Tag color={summary.available <= 0 ? 'error' : summary.available <= 10 ? 'warning' : 'success'}>
+            {summary.available}
+          </Tag>
+        )
+      },
+    },
+  ]
+
+  const reservationColumns: TableColumnsType<QuotaReservation> = [
+    {
+      title: '资料包',
+      width: 170,
+      render: (_, record) =>
+        data.packages.find((item) => item.id === record.packageId)?.code ?? record.packageId,
+    },
+    { title: '轮次', dataIndex: 'round', width: 70, render: (value: number) => `第 ${value} 轮` },
+    { title: '额度', dataIndex: 'amount', width: 80 },
+    {
+      title: '状态',
+      dataIndex: 'status',
+      width: 90,
+      render: (value: QuotaReservation['status']) => (
+        <Tag color={reservationStatusMeta[value].color}>{reservationStatusMeta[value].label}</Tag>
+      ),
+    },
+    {
+      title: '依据',
+      width: 200,
+      render: (_, record) =>
+        record.basis
+          ? `第 ${record.basis.round} 轮 / ${record.basis.fileVersions.map((item) => item.versionLabel).join('、') || '无文件'}`
+          : '基线（无快照）',
+    },
+    { title: '说明', dataIndex: 'reason', render: (value: string) => <span className="muted">{value}</span> },
+  ]
+
+  const conflictColumns: TableColumnsType<QuotaConflict> = [
+    {
+      title: '后到资料包',
+      width: 170,
+      render: (_, record) =>
+        data.packages.find((item) => item.id === record.packageId)?.code ?? record.packageId,
+    },
+    {
+      title: '先到资料包',
+      width: 170,
+      render: (_, record) =>
+        data.packages.find((item) => item.id === record.competitorPackageId)?.code ??
+        record.competitorPackageId,
+    },
+    { title: '需求', dataIndex: 'requested', width: 80 },
+    { title: '当时可用', dataIndex: 'available', width: 100 },
+    { title: '缺额', dataIndex: 'shortfall', width: 80, render: (value: number) => <Tag color="error">{value}</Tag> },
+    { title: '原因', dataIndex: 'reason' },
   ]
 
   async function refreshValidation() {
@@ -83,30 +196,84 @@ export function LicensePage() {
   async function deduct() {
     if (!selected) return
     try {
-      await deductQuota({ packageId: selected.id, amount }).unwrap()
-      message.success(`已扣减 ${amount} 个许可额度`)
+      await deductQuota({
+        packageId: selected.id,
+        amount,
+        crashPoint: crashNext ? 'after-batch-save' : undefined,
+      }).unwrap()
+      message.success(`已确认扣减 ${amount}，预占剩余已释放回池`)
+      setCrashNext(false)
     } catch (error) {
-      const detail =
-        typeof error === 'object' && error && 'data' in error
-          ? (error.data as { error?: string }).error
-          : undefined
-      message.error(detail ?? '额度扣减失败')
+      message.error(errorText(error))
     }
   }
+
+  async function recover() {
+    try {
+      const result = await recoverBatches().unwrap()
+      if (result.recovered.length) {
+        result.recovered.forEach((note) => message.success(note, 6))
+      } else {
+        message.info('未完成批次仍缺额度，已保留完整批次，额度释放后可再次恢复。')
+      }
+    } catch (error) {
+      message.error(errorText(error))
+    }
+  }
+
+  async function runConcurrentDemo() {
+    try {
+      await concurrentDemo().unwrap()
+      message.success('已模拟两人同时提交：先到者预占成功，后到者留下冲突意见', 5)
+    } catch (error) {
+      message.error(errorText(error))
+    }
+  }
+
+  const maxDeduct = hold ? hold.amount : 0
+  const packageComments = data.comments.filter((item) => item.packageId === selectedId)
 
   return (
     <div>
       <PageHeader
-        title="许可与额度"
-        description="根据资料分类、国家地区、技术参数和人员范围匹配规则，补正声明并控制额度扣减。"
+        title="许可与额度预占账"
+        description="进入审批即按规则上限整池预占；现行版本、引用版本或技术参数变化后按新依据重算，已完成审批保留原依据，额度不重复占用。"
         actions={
-          selected ? (
-            <Button loading={deductState.isLoading} onClick={refreshValidation}>
-              重新校验
+          <Space>
+            <Button
+              icon={<ThunderboltOutlined />}
+              loading={demoState.isLoading}
+              onClick={runConcurrentDemo}
+            >
+              模拟两人同时提交
             </Button>
-          ) : null
+            {selected ? (
+              <Button loading={recoverState.isLoading} onClick={refreshValidation}>
+                重新校验
+              </Button>
+            ) : null}
+          </Space>
         }
       />
+
+      {pendingBatches.length ? (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={`检测到 ${pendingBatches.length} 个异常退出后未完成的预占/扣减批次（WAL 已完整保留）`}
+          description={
+            <Space direction="vertical" style={{ width: '100%' }}>
+              <span>
+                恢复是幂等的：预占已存在则不重复建立，扣减已落账则不重复扣减；额度仍不足时批次继续保留，不重复占用。
+              </span>
+              <Button type="primary" ghost size="small" loading={recoverState.isLoading} onClick={recover}>
+                立即恢复未完成批次
+              </Button>
+            </Space>
+          }
+        />
+      ) : null}
 
       <div className="two-column">
         <section className="panel">
@@ -130,15 +297,19 @@ export function LicensePage() {
               <Descriptions.Item label="技术参数">
                 {selected.technologyTags.join('、')}
               </Descriptions.Item>
-              <Descriptions.Item label="人员范围">
-                {selected.personnelScopes.join('、') || '无特别范围'}
-              </Descriptions.Item>
               <Descriptions.Item label="审批状态">
                 {selected.status === 'approved'
-                  ? '已批准，可核对额度'
+                  ? '已批准，待确认扣减（预占仍持有）'
                   : selected.status === 'licensed'
-                    ? '已扣减额度'
-                    : '尚未完成审批'}
+                    ? '已确认扣减'
+                    : selected.status === 'quota-blocked'
+                      ? '依据变化后预占失效，待恢复'
+                      : '审批在途（额度已预占）'}
+              </Descriptions.Item>
+              <Descriptions.Item label="当前预占依据">
+                {selected.quotaBasis
+                  ? `第 ${selected.quotaBasis.round} 轮 / ${selected.quotaBasis.fileVersions.map((item) => item.versionLabel).join('、') || '无文件'}`
+                  : '无'}
               </Descriptions.Item>
             </Descriptions>
           ) : null}
@@ -146,42 +317,32 @@ export function LicensePage() {
 
         <section className="panel">
           <div className="panel-title">
-            <h3>规则匹配解释</h3>
-            <Tag color={applicableRule ? 'success' : 'error'}>
-              {applicableRule ? '存在适用规则' : '无适用规则'}
-            </Tag>
+            <h3>规则池台账</h3>
+            {currentRule ? <Tag color="blue">{currentRule.name}</Tag> : null}
           </div>
-          {applicableRule ? (
-            <Space direction="vertical" size={14} style={{ width: '100%' }}>
+          {pool && currentRule ? (
+            <Space direction="vertical" size={12} style={{ width: '100%' }}>
+              <Progress
+                percent={Math.min(
+                  100,
+                  Math.round(((pool.confirmed + pool.held) / pool.limit) * 100),
+                )}
+                status={pool.available <= 0 ? 'exception' : 'active'}
+              />
+              <div>
+                规则上限 <strong>{pool.limit}</strong> · 已确认 {pool.confirmed} · 预占中{' '}
+                <strong>{pool.held}</strong> · 可预占{' '}
+                <Tag color={pool.available <= 0 ? 'error' : 'success'}>{pool.available}</Tag>
+                {pool.overbooked ? <Tag color="warning">历史基线超占</Tag> : null}
+              </div>
               <Alert
                 type="info"
                 showIcon
-                message={applicableRule.name}
-                description={applicableRule.explanation}
+                message="两个审批窗口同时抢同一份额度：预占按规则上限整池占用，先到者生效，后到者被挡住并留冲突。"
               />
-              <div>
-                <strong>必要声明核对</strong>
-                <div style={{ marginTop: 8 }}>
-                  {applicableRule.requiredDeclarations.map((declaration) => (
-                    <Tag
-                      key={declaration}
-                      color={selected?.declarations.includes(declaration) ? 'success' : 'error'}
-                    >
-                      {declaration}
-                    </Tag>
-                  ))}
-                </div>
-              </div>
-              <div>
-                <strong>审批升级</strong>
-                <div className="muted" style={{ marginTop: 5 }}>
-                  规则要求 {approvalLevelLabels[applicableRule.approvalLevel]}；当前路线规则：
-                  {currentRule?.name ?? '未生成'}。
-                </div>
-              </div>
             </Space>
           ) : (
-            <Alert type="error" showIcon message="没有匹配到规则，必须执行人工判定。" />
+            <Alert type="warning" showIcon message="当前资料包尚未匹配规则。" />
           )}
         </section>
       </div>
@@ -189,7 +350,7 @@ export function LicensePage() {
       <div className="two-column">
         <section className="panel">
           <div className="panel-title">
-            <h3>缺失声明与升级要求</h3>
+            <h3>缺失声明、依据失效与冲突</h3>
             <Tag color={hasHighFindings ? 'error' : 'success'}>{packageFindings.length} 项</Tag>
           </div>
           <Space direction="vertical" size={10} style={{ width: '100%' }}>
@@ -210,25 +371,31 @@ export function LicensePage() {
 
         <section className="panel">
           <div className="panel-title">
-            <h3>许可额度扣减</h3>
+            <h3>预占转确认扣减</h3>
             <SafetyCertificateOutlined />
           </div>
           {selected ? (
-            <Space direction="vertical" size={16} style={{ width: '100%' }}>
-              <Progress
-                percent={Math.round((selected.quotaUsed / selected.quotaLimit) * 100)}
-                status={selected.quotaUsed >= selected.quotaLimit ? 'exception' : 'active'}
+            <Space direction="vertical" size={14} style={{ width: '100%' }}>
+              <Alert
+                type="info"
+                showIcon
+                message={
+                  hold
+                    ? `当前持有预占 ${hold.amount}（第 ${hold.round} 轮，依据 ${hold.basis?.fileVersions.map((item) => item.versionLabel).join('、') || '无文件'}）。`
+                    : '当前没有有效预占。'
+                }
               />
               <div>
-                已使用 {selected.quotaUsed}，剩余 {remaining}，规则上限 {selected.quotaLimit}
+                已确认 {selected.quotaUsed}，预占中 {hold?.amount ?? 0}，规则上限 {selected.quotaLimit}
               </div>
               <InputNumber
                 min={1}
-                max={Math.max(1, remaining)}
+                max={Math.max(1, maxDeduct)}
                 value={amount}
                 onChange={(value) => setAmount(value ?? 1)}
                 addonAfter="额度单位"
                 style={{ width: '100%' }}
+                disabled={!hold}
               />
               <Button
                 type="primary"
@@ -236,32 +403,107 @@ export function LicensePage() {
                 disabled={
                   selected.status !== 'approved' ||
                   hasHighFindings ||
-                  amount > remaining ||
-                  remaining <= 0
+                  !hold ||
+                  amount > maxDeduct
                 }
                 loading={deductState.isLoading}
                 onClick={deduct}
               >
-                确认扣减并完成许可
+                确认扣减并完成许可（预占剩余释放回池）
               </Button>
               {selected.status !== 'approved' ? (
-                <Alert type="warning" showIcon message="只有全部审批步骤完成后才允许扣减额度。" />
+                <Alert type="warning" showIcon message="只有全部审批步骤完成后才允许确认扣减；审批期间额度已预占。" />
               ) : null}
-              {hasHighFindings ? (
-                <Alert type="error" showIcon message="存在高风险核对项，系统拒绝扣减额度。" />
+
+              <Button
+                block
+                danger={crashNext}
+                icon={<ExperimentOutlined />}
+                onClick={() =>
+                  setCrashNext((value) => {
+                    message.info(!value ? '已武装：下一次确认扣减将在批次落盘后异常退出' : '已取消异常模拟')
+                    return !value
+                  })
+                }
+              >
+                {crashNext ? '取消异常模拟' : '模拟写入异常退出（验证 WAL 恢复）'}
+              </Button>
+              {crashNext ? (
+                <Alert type="error" showIcon message="已武装：下一次确认扣减将异常退出，请观察刷新后的自动恢复。" />
               ) : null}
             </Space>
           ) : null}
         </section>
       </div>
 
+      {selected && packageComments.length ? (
+        <section className="panel">
+          <div className="panel-title">
+            <h3>审批意见、冲突与依据变更留痕</h3>
+          </div>
+          <Timeline
+            items={packageComments.slice(0, 12).map((item) => ({
+              color:
+                item.kind === 'conflict' ? 'red' : item.kind === 'basis' ? 'orange' : 'blue',
+              children: (
+                <div>
+                  <Space size={8} wrap>
+                    <Tag color={commentKindMeta[item.kind ?? 'manual'].color}>
+                      {commentKindMeta[item.kind ?? 'manual'].label}
+                    </Tag>
+                    <strong>{item.author}</strong>
+                    <span className="muted">
+                      {new Date(item.createdAt).toLocaleString('zh-CN')} · 第 {item.round} 轮
+                    </span>
+                  </Space>
+                  <div>{item.content}</div>
+                </div>
+              ),
+            }))}
+          />
+        </section>
+      ) : null}
+
       <section className="panel">
         <div className="panel-title">
-          <h3>规则清单</h3>
-          <span className="muted">规则用于解释匹配结果，不允许在审批页面直接修改</span>
+          <h3>规则额度池</h3>
+          <span className="muted">已确认 = 历史基线 + 实扣；预占中 = 在途审批整池占用</span>
         </div>
         <Table rowKey="id" columns={ruleColumns} dataSource={data.rules} pagination={false} />
       </section>
+
+      <div className="two-column">
+        <section className="panel">
+          <div className="panel-title">
+            <h3>预占台账明细</h3>
+            <Tag>{data.reservations.length} 笔</Tag>
+          </div>
+          <Table
+            rowKey="id"
+            columns={reservationColumns}
+            dataSource={data.reservations}
+            pagination={{ pageSize: 6, showSizeChanger: false }}
+            size="small"
+          />
+        </section>
+        <section className="panel">
+          <div className="panel-title">
+            <h3>并发冲突记录</h3>
+            <Tag color={data.conflicts.length ? 'error' : 'success'}>{data.conflicts.length} 条</Tag>
+          </div>
+          {data.conflicts.length ? (
+            <Table
+              rowKey="id"
+              columns={conflictColumns}
+              dataSource={data.conflicts}
+              pagination={{ pageSize: 6, showSizeChanger: false }}
+              size="small"
+            />
+          ) : (
+            <Alert type="info" showIcon message="暂无并发冲突。点击上方“模拟两人同时提交”可演示先到先得与缺额留痕。" />
+          )}
+        </section>
+      </div>
     </div>
   )
 }
